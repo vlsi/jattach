@@ -1,0 +1,8 @@
+*.test
+*.prof
+*.o
+*.a
+*.so
+*.dylib
+cmd/jattach-go/jattach-go
+.DS_Store

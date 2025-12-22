@@ -26,7 +26,7 @@ else
 endif
 
 
-.PHONY: all dll clean rpm-dirs rpm
+.PHONY: all dll clean rpm-dirs rpm go-build go-test go-cli go-cli-posix go-cli-windows go-cli-all go-clean
 
 all: build build/$(JATTACH_EXE)
 
@@ -46,6 +46,46 @@ build/jattach.exe: src/windows/jattach.c
 
 clean:
 	rm -rf build
+
+# Go targets
+go-build:
+	go build
+
+go-test:
+	go test -v
+
+go-cli:
+	cd cmd/jattach-go && go build -o jattach-go
+
+# Cross-compile Go CLI for POSIX platforms (Linux and macOS)
+# Note: CGo is used, so cross-compilation works within the same OS family
+go-cli-posix: build
+	@echo "Building Go CLI for POSIX platforms..."
+	cd cmd/jattach-go && \
+		GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -o ../../build/jattach-go-linux-amd64 && \
+		GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go build -o ../../build/jattach-go-linux-arm64 && \
+		GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -o ../../build/jattach-go-darwin-amd64 && \
+		GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -o ../../build/jattach-go-darwin-arm64
+	@echo "Go CLI POSIX binaries built in build/"
+
+# Cross-compile Go CLI for Windows
+# Note: Requires mingw-w64 cross-compiler: brew install mingw-w64 (macOS) or apt install mingw-w64 (Linux)
+go-cli-windows: build
+	@echo "Building Go CLI for Windows..."
+	@echo "Note: This requires mingw-w64 cross-compiler toolchain"
+	cd cmd/jattach-go && \
+		CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -o ../../build/jattach-go-windows-amd64.exe && \
+		CGO_ENABLED=1 GOOS=windows GOARCH=386 CC=i686-w64-mingw32-gcc go build -o ../../build/jattach-go-windows-386.exe
+	@echo "Go CLI Windows binaries built in build/"
+
+# Cross-compile Go CLI for all platforms (requires cross-compilers)
+go-cli-all: go-cli-posix go-cli-windows
+
+go-clean:
+	go clean
+	cd cmd/jattach-go && go clean
+	rm -f cmd/jattach-go/jattach-go
+	rm -f build/jattach-go-*
 
 $(RPM_ROOT):
 	mkdir -p $(RPM_ROOT)
