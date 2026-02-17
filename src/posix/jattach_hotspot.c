@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -133,15 +134,15 @@ static int write_command(int fd, int argc, char** argv) {
     return 0;
 }
 
-// Mirror response from remote JVM to stdout
-static int read_response(int fd, int argc, char** argv, int print_output) {
+// Mirror response from remote JVM to out_fd
+static int read_response(int fd, int argc, char** argv, int out_fd, int err_fd) {
     char buf[8192];
     ssize_t bytes = read(fd, buf, sizeof(buf) - 1);
     if (bytes == 0) {
-        fprintf(stderr, "Unexpected EOF reading response\n");
+        dprintf(err_fd, "Unexpected EOF reading response\n");
         return 1;
     } else if (bytes < 0) {
-        perror("Error reading response");
+        dprintf(err_fd, "Error reading response: %s\n", strerror(errno));
         return 1;
     }
 
@@ -162,42 +163,42 @@ static int read_response(int fd, int argc, char** argv, int print_output) {
         result = atoi(strncmp(buf + 2, "return code: ", 13) == 0 ? buf + 15 : buf + 2);
     }
 
-    if (print_output) {
-        // Mirror JVM response to stdout
-        printf("JVM response code = ");
+    if (out_fd >= 0) {
+        // Mirror JVM response to out_fd
+        dprintf(out_fd, "JVM response code = ");
         do {
-            fwrite(buf, 1, bytes, stdout);
+            write(out_fd, buf, bytes);
             bytes = read(fd, buf, sizeof(buf));
         } while (bytes > 0);
-        printf("\n");
+        write(out_fd, "\n", 1);
     }
 
     return result;
 }
 
-int jattach_hotspot(int pid, int nspid, int argc, char** argv, int print_output) {
+int jattach_hotspot(int pid, int nspid, int argc, char** argv, int out_fd, int err_fd) {
     if (check_socket(nspid) != 0 && start_attach_mechanism(pid, nspid) != 0) {
-        perror("Could not start attach mechanism");
+        dprintf(err_fd, "Could not start attach mechanism: %s\n", strerror(errno));
         return 1;
     }
 
     int fd = connect_socket(nspid);
     if (fd == -1) {
-        perror("Could not connect to socket");
+        dprintf(err_fd, "Could not connect to socket: %s\n", strerror(errno));
         return 1;
     }
 
-    if (print_output) {
-        printf("Connected to remote JVM\n");
+    if (out_fd >= 0) {
+        dprintf(out_fd, "Connected to remote JVM\n");
     }
 
     if (write_command(fd, argc, argv) != 0) {
-        perror("Error writing to socket");
+        dprintf(err_fd, "Error writing to socket: %s\n", strerror(errno));
         close(fd);
         return 1;
     }
 
-    int result = read_response(fd, argc, argv, print_output);
+    int result = read_response(fd, argc, argv, out_fd, err_fd);
     close(fd);
 
     return result;

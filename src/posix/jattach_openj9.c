@@ -78,8 +78,8 @@ static void translate_command(char* buf, size_t bufsize, int argc, char** argv) 
     buf[bufsize - 1] = 0;
 }
 
-// Unescape a string and print it on stdout
-static void print_unescaped(char* str) {
+// Unescape a string and print it to out_fd
+static void print_unescaped(char* str, int out_fd) {
     char* p = strchr(str, '\n');
     if (p != NULL) {
         *p = 0;
@@ -104,12 +104,12 @@ static void print_unescaped(char* str) {
             default:
                 *p = p[1];
         }
-        fwrite(str, 1, p - str + 1, stdout);
+        write(out_fd, str, p - str + 1);
         str = p + 2;
     }
 
-    fwrite(str, 1, strlen(str), stdout);
-    printf("\n");
+    write(out_fd, str, strlen(str));
+    write(out_fd, "\n", 1);
 }
 
 // Send command with arguments to socket
@@ -126,8 +126,8 @@ static int write_command(int fd, const char* cmd) {
     return 0;
 }
 
-// Mirror response from remote JVM to stdout
-static int read_response(int fd, const char* cmd, int print_output) {
+// Mirror response from remote JVM to out_fd
+static int read_response(int fd, const char* cmd, int out_fd, int err_fd) {
     size_t size = 8192;
     char* buf = malloc(size);
 
@@ -135,10 +135,10 @@ static int read_response(int fd, const char* cmd, int print_output) {
     while (buf != NULL) {
         ssize_t bytes = read(fd, buf + off, size - off);
         if (bytes == 0) {
-            fprintf(stderr, "Unexpected EOF reading response\n");
+            dprintf(err_fd, "Unexpected EOF reading response\n");
             return 1;
         } else if (bytes < 0) {
-            perror("Error reading response");
+            dprintf(err_fd, "Error reading response: %s\n", strerror(errno));
             return 1;
         }
 
@@ -153,7 +153,7 @@ static int read_response(int fd, const char* cmd, int print_output) {
     }
 
     if (buf == NULL) {
-        fprintf(stderr, "Failed to allocate memory for response\n");
+        dprintf(err_fd, "Failed to allocate memory for response\n");
         return 1;
     }
 
@@ -164,19 +164,19 @@ static int read_response(int fd, const char* cmd, int print_output) {
             // AgentOnLoad error code comes right after AgentInitializationException
             result = strncmp(buf, "ATTACH_ERR AgentInitializationException", 39) == 0 ? atoi(buf + 39) : -1;
         }
-    } else if (strncmp(cmd, "ATTACH_DIAGNOSTICS:", 19) == 0 && print_output) {
+    } else if (strncmp(cmd, "ATTACH_DIAGNOSTICS:", 19) == 0 && out_fd >= 0) {
         char* p = strstr(buf, "openj9_diagnostics.string_result=");
         if (p != NULL) {
             // The result of a diagnostic command is encoded in Java Properties format
-            print_unescaped(p + 33);
+            print_unescaped(p + 33, out_fd);
             free(buf);
             return result;
         }
     }
 
-    if (print_output) {
+    if (out_fd >= 0) {
         buf[off - 1] = '\n';
-        fwrite(buf, 1, off, stdout);
+        write(out_fd, buf, off);
     }
 
     free(buf);
@@ -306,13 +306,13 @@ static int notify_semaphore(int value, int notif_count) {
     return 0;
 }
 
-static int accept_client(int s, unsigned long long key) {
+static int accept_client(int s, unsigned long long key, int err_fd) {
     struct timeval tv = {5, 0};
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     int client = accept(s, NULL, NULL);
     if (client < 0) {
-        perror("JVM did not respond");
+        dprintf(err_fd, "JVM did not respond: %s\n", strerror(errno));
         return -1;
     }
 
@@ -321,7 +321,7 @@ static int accept_client(int s, unsigned long long key) {
     while (off < sizeof(buf)) {
         ssize_t bytes = recv(client, buf + off, sizeof(buf) - off, 0);
         if (bytes <= 0) {
-            fprintf(stderr, "The JVM connection was prematurely closed\n");
+            dprintf(err_fd, "The JVM connection was prematurely closed\n");
             close(client);
             return -1;
         }
@@ -331,7 +331,7 @@ static int accept_client(int s, unsigned long long key) {
     char expected[35];
     snprintf(expected, sizeof(expected), "ATTACH_CONNECTED %016llx ", key);
     if (memcmp(buf, expected, sizeof(expected) - 1) != 0) {
-        fprintf(stderr, "Unexpected JVM response\n");
+        dprintf(err_fd, "Unexpected JVM response\n");
         close(client);
         return -1;
     }
@@ -381,10 +381,10 @@ int is_openj9_process(int pid) {
     return stat(path, &stats) == 0;
 }
 
-int jattach_openj9(int pid, int nspid, int argc, char** argv, int print_output) {
+int jattach_openj9(int pid, int nspid, int argc, char** argv, int out_fd, int err_fd) {
     int attach_lock = acquire_lock("", "_attachlock");
     if (attach_lock < 0) {
-        perror("Could not acquire attach lock");
+        dprintf(err_fd, "Could not acquire attach lock: %s\n", strerror(errno));
         return 1;
     }
 
@@ -392,23 +392,23 @@ int jattach_openj9(int pid, int nspid, int argc, char** argv, int print_output) 
     int port;
     int s = create_attach_socket(&port);
     if (s < 0) {
-        perror("Failed to listen to attach socket");
+        dprintf(err_fd, "Failed to listen to attach socket: %s\n", strerror(errno));
         goto error;
     }
 
     unsigned long long key = random_key();
     if (write_reply_info(nspid, port, key) != 0) {
-        perror("Could not write replyInfo");
+        dprintf(err_fd, "Could not write replyInfo: %s\n", strerror(errno));
         goto error;
     }
 
     notif_count = lock_notification_files();
     if (notify_semaphore(1, notif_count) != 0) {
-        perror("Could not notify semaphore");
+        dprintf(err_fd, "Could not notify semaphore: %s\n", strerror(errno));
         goto error;
     }
 
-    int fd = accept_client(s, key);
+    int fd = accept_client(s, key, err_fd);
     if (fd < 0) {
         // The error message has been already printed
         goto error;
@@ -419,20 +419,20 @@ int jattach_openj9(int pid, int nspid, int argc, char** argv, int print_output) 
     notify_semaphore(-1, notif_count);
     release_lock(attach_lock);
 
-    if (print_output) {
-        printf("Connected to remote JVM\n");
+    if (out_fd >= 0) {
+        dprintf(out_fd, "Connected to remote JVM\n");
     }
 
     char cmd[8192];
     translate_command(cmd, sizeof(cmd), argc, argv);
 
     if (write_command(fd, cmd) != 0) {
-        perror("Error writing to socket");
+        dprintf(err_fd, "Error writing to socket: %s\n", strerror(errno));
         close(fd);
         return 1;
     }
 
-    int result = read_response(fd, cmd, print_output);
+    int result = read_response(fd, cmd, out_fd, err_fd);
     if (result != 1) {
         detach(fd);
     }

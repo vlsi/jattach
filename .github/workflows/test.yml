@@ -1,0 +1,52 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - master
+      - 'rel/**'
+  pull_request:
+    branches:
+      - master
+      - 'rel/**'
+
+jobs:
+  test:
+    name: Test ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      # Build test binary once, reuse across Java versions
+      - name: Build test binary
+        run: go test -c -o jattach-test${{ runner.os == 'Windows' && '.exe' || '' }}
+
+      - name: Setup Java 17
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Test with Java 17
+        # -count=1 disables test caching to ensure tests actually run with each Java version
+        run: go test -v -count=1
+
+      - name: Setup Java 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Test with Java 21
+        run: go test -v -count=1
+

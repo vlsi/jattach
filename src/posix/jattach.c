@@ -14,29 +14,31 @@
  * limitations under the License.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <signal.h>
 #include <unistd.h>
 #include "psutil.h"
 
 
 extern int is_openj9_process(int pid);
-extern int jattach_openj9(int pid, int nspid, int argc, char** argv, int print_output);
-extern int jattach_hotspot(int pid, int nspid, int argc, char** argv, int print_output);
+extern int jattach_openj9(int pid, int nspid, int argc, char** argv, int out_fd, int err_fd);
+extern int jattach_hotspot(int pid, int nspid, int argc, char** argv, int out_fd, int err_fd);
 
 int mnt_changed = 0;
 
 
 __attribute__((visibility("default")))
-int jattach(int pid, int argc, char** argv, int print_output) {
+int jattach(int pid, int argc, char** argv, int out_fd, int err_fd) {
     uid_t my_uid = geteuid();
     gid_t my_gid = getegid();
     uid_t target_uid = my_uid;
     gid_t target_gid = my_gid;
     int nspid;
     if (get_process_info(pid, &target_uid, &target_gid, &nspid) < 0) {
-        fprintf(stderr, "Process %d not found\n", pid);
+        dprintf(err_fd, "Process %d not found\n", pid);
         return 1;
     }
 
@@ -50,7 +52,7 @@ int jattach(int pid, int argc, char** argv, int print_output) {
     // If we are running under root, switch to the required euid/egid automatically.
     if ((my_gid != target_gid && setegid(target_gid) != 0) ||
         (my_uid != target_uid && seteuid(target_uid) != 0)) {
-        perror("Failed to change credentials to match the target process");
+        dprintf(err_fd, "Failed to change credentials to match the target process: %s\n", strerror(errno));
         return 1;
     }
 
@@ -60,9 +62,9 @@ int jattach(int pid, int argc, char** argv, int print_output) {
     signal(SIGPIPE, SIG_IGN);
 
     if (is_openj9_process(nspid)) {
-        return jattach_openj9(pid, nspid, argc, argv, print_output);
+        return jattach_openj9(pid, nspid, argc, argv, out_fd, err_fd);
     } else {
-        return jattach_hotspot(pid, nspid, argc, argv, print_output);
+        return jattach_hotspot(pid, nspid, argc, argv, out_fd, err_fd);
     }
 }
 
@@ -87,7 +89,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    return jattach(pid, argc - 2, argv + 2, 1);
+    return jattach(pid, argc - 2, argv + 2, STDOUT_FILENO, STDERR_FILENO);
 }
 
 #endif // JATTACH_VERSION
