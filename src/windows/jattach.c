@@ -14,10 +14,22 @@
  * limitations under the License.
  */
 
+#include <io.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
 #include <sddl.h>
+
+static int dprintf(int fd, const char* fmt, ...) {
+    char buf[4096];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > 0) _write(fd, buf, n);
+    return n;
+}
 
 typedef HMODULE (WINAPI *GetModuleHandle_t)(LPCTSTR lpModuleName);
 typedef FARPROC (WINAPI *GetProcAddress_t)(HMODULE hModule, LPCSTR lpProcName);
@@ -107,8 +119,8 @@ static LPVOID allocate_data(HANDLE hProcess, char* pipeName, int argc, char** ar
     return remoteData;
 }
 
-static void print_error(const char* msg, DWORD code) {
-    printf("%s (error code = %d)\n", msg, code);
+static void print_error(int err_fd, const char* msg, DWORD code) {
+    dprintf(err_fd, "%s (error code = %d)\n", msg, code);
 }
 
 // If the process is owned by another user, request SeDebugPrivilege to open it.
@@ -138,11 +150,11 @@ static int enable_debug_privileges() {
 }
 
 // Fail if attaching 64-bit jattach to 32-bit JVM or vice versa
-static int check_bitness(HANDLE hProcess) {
+static int check_bitness(HANDLE hProcess, int err_fd) {
 #ifdef _WIN64
     BOOL targetWow64 = FALSE;
     if (IsWow64Process(hProcess, &targetWow64) && targetWow64) {
-        printf("Cannot attach 64-bit process to 32-bit JVM\n");
+        dprintf(err_fd, "Cannot attach 64-bit process to 32-bit JVM\n");
         return 0;
     }
 #else
@@ -150,7 +162,7 @@ static int check_bitness(HANDLE hProcess) {
     BOOL targetWow64 = FALSE;
     if (IsWow64Process(GetCurrentProcess(), &thisWow64) && IsWow64Process(hProcess, &targetWow64)) {
         if (thisWow64 != targetWow64)  {
-            printf("Cannot attach 32-bit process to 64-bit JVM\n");
+            dprintf(err_fd, "Cannot attach 32-bit process to 64-bit JVM\n");
             return 0;
         }
     }
@@ -160,21 +172,21 @@ static int check_bitness(HANDLE hProcess) {
 
 // The idea of Dynamic Attach on Windows is to inject a thread into remote JVM
 // that calls JVM_EnqueueOperation() function exported by HotSpot DLL
-static int inject_thread(int pid, char* pipeName, int argc, char** argv) {
+static int inject_thread(int pid, char* pipeName, int argc, char** argv, int out_fd, int err_fd) {
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, (DWORD)pid);
     if (hProcess == NULL && GetLastError() == ERROR_ACCESS_DENIED) {
         if (!enable_debug_privileges()) {
-            print_error("Not enough privileges", GetLastError());
+            print_error(err_fd, "Not enough privileges", GetLastError());
             return 0;
         }
         hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, (DWORD)pid);
     }
     if (hProcess == NULL) {
-        print_error("Could not open process", GetLastError());
+        print_error(err_fd, "Could not open process", GetLastError());
         return 0;
     }
 
-    if (!check_bitness(hProcess)) {
+    if (!check_bitness(hProcess, err_fd)) {
         CloseHandle(hProcess);
         return 0;
     }
@@ -182,7 +194,7 @@ static int inject_thread(int pid, char* pipeName, int argc, char** argv) {
     LPTHREAD_START_ROUTINE code = allocate_code(hProcess);
     LPVOID data = code != NULL ? allocate_data(hProcess, pipeName, argc, argv) : NULL;
     if (data == NULL) {
-        print_error("Could not allocate memory in target process", GetLastError());
+        print_error(err_fd, "Could not allocate memory in target process", GetLastError());
         CloseHandle(hProcess);
         return 0;
     }
@@ -190,15 +202,14 @@ static int inject_thread(int pid, char* pipeName, int argc, char** argv) {
     int success = 1;
     HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, code, data, 0, NULL);
     if (hThread == NULL) {
-        print_error("Could not create remote thread", GetLastError());
+        print_error(err_fd, "Could not create remote thread", GetLastError());
         success = 0;
     } else {
-        printf("Connected to remote process\n");
         WaitForSingleObject(hThread, INFINITE);
         DWORD exitCode;
         GetExitCodeThread(hThread, &exitCode);
         if (exitCode != 0) {
-            print_error("Attach is not supported by the target process", exitCode);
+            print_error(err_fd, "Attach is not supported by the target process", exitCode);
             success = 0;
         }
         CloseHandle(hThread);
@@ -211,14 +222,14 @@ static int inject_thread(int pid, char* pipeName, int argc, char** argv) {
     return success;
 }
 
-// JVM response is read from the pipe and mirrored to stdout
-static int read_response(HANDLE hPipe, int print_output) {
+// JVM response is read from the pipe and mirrored to out_fd
+static int read_response(HANDLE hPipe, int out_fd, int err_fd) {
     ConnectNamedPipe(hPipe, NULL);
 
     char buf[8192];
     DWORD bytesRead;
     if (!ReadFile(hPipe, buf, sizeof(buf) - 1, &bytesRead, NULL)) {
-        print_error("Error reading response", GetLastError());
+        print_error(err_fd, "Error reading response", GetLastError());
         return 1;
     }
 
@@ -226,19 +237,19 @@ static int read_response(HANDLE hPipe, int print_output) {
     buf[bytesRead] = 0;
     int result = atoi(buf);
 
-    if (print_output) {
-        // Mirror JVM response to stdout
-        printf("JVM response code = ");
+    if (out_fd >= 0) {
+        // Mirror JVM response to out_fd
+        dprintf(out_fd, "JVM response code = ");
         do {
-            fwrite(buf, 1, bytesRead, stdout);
+            _write(out_fd, buf, bytesRead);
         } while (ReadFile(hPipe, buf, sizeof(buf), &bytesRead, NULL));
-         printf("\n");
-     }
+        _write(out_fd, "\n", 1);
+    }
 
     return result;
 }
 
-int jattach(int pid, int argc, char** argv, int print_output) {
+int jattach(int pid, int argc, char** argv, int out_fd, int err_fd) {
     // When attaching as an Administrator, make sure the target process can connect to our pipe,
     // i.e. allow read-write access to everyone. For the complete format description, see
     // https://docs.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-string-format
@@ -251,19 +262,19 @@ int jattach(int pid, int argc, char** argv, int print_output) {
     HANDLE hPipe = CreateNamedPipe(pipeName, PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                                    1, 4096, 8192, NMPWAIT_USE_DEFAULT_WAIT, &sec);
     if (hPipe == INVALID_HANDLE_VALUE) {
-        print_error("Could not create pipe", GetLastError());
+        print_error(err_fd, "Could not create pipe", GetLastError());
         LocalFree(sec.lpSecurityDescriptor);
         return 1;
     }
 
     LocalFree(sec.lpSecurityDescriptor);
 
-    if (!inject_thread(pid, pipeName, argc, argv)) {
+    if (!inject_thread(pid, pipeName, argc, argv, out_fd, err_fd)) {
         CloseHandle(hPipe);
         return 1;
     }
 
-    int result = read_response(hPipe, print_output);
+    int result = read_response(hPipe, out_fd, err_fd);
     CloseHandle(hPipe);
 
     return result;
@@ -290,7 +301,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    return jattach(pid, argc - 2, argv + 2, 1);
+    return jattach(pid, argc - 2, argv + 2, _fileno(stdout), _fileno(stderr));
 }
 
 #endif // JATTACH_VERSION

@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 )
 
 // Command represents a JVM attach command type.
@@ -73,52 +74,43 @@ const (
 )
 
 // Attach sends a command to a JVM process.
-// The command output is printed to stdout.
+// The command output is printed to stdout, errors to stderr.
 // Returns the exit code from the JVM command.
 func Attach(pid int, cmd Command, args ...string) (int, error) {
 	cmdArgs := append([]string{string(cmd)}, args...)
-	return callJattach(pid, cmdArgs, true)
+	return callJattach(pid, cmdArgs, int(os.Stdout.Fd()), int(os.Stderr.Fd()))
 }
 
 // AttachWithOutput sends a command to a JVM process and captures the output.
-// Unlike Attach, this function captures stdout instead of printing it.
+// Unlike Attach, this function captures both stdout and stderr from the C code
+// via a pipe passed directly as file descriptors.
 // Returns the captured output, exit code, and any error.
 func AttachWithOutput(pid int, cmd Command, args ...string) (string, int, error) {
-	// Create a pipe to capture stdout
 	r, w, err := os.Pipe()
 	if err != nil {
 		return "", 1, fmt.Errorf("failed to create pipe: %w", err)
 	}
 
-	// Save original stdout and restore it when done
-	oldStdout := os.Stdout
-	defer func() {
-		os.Stdout = oldStdout
-	}()
-
-	// Redirect stdout to our pipe
-	os.Stdout = w
-
-	// Capture output in a goroutine
-	outputChan := make(chan string, 1)
+	// Read from pipe in a goroutine
+	var buf bytes.Buffer
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
-		var buf bytes.Buffer
+		defer wg.Done()
 		io.Copy(&buf, r)
-		outputChan <- buf.String()
 	}()
 
-	// Execute the command
+	// Execute the command with pipe write-end as both out_fd and err_fd
 	cmdArgs := append([]string{string(cmd)}, args...)
-	exitCode, err := callJattach(pid, cmdArgs, true)
+	writeFd := int(w.Fd())
+	exitCode, callErr := callJattach(pid, cmdArgs, writeFd, writeFd)
 
-	// Close the write end of the pipe
+	// Close the write end so the reader goroutine finishes
 	w.Close()
-
-	// Read the captured output
-	output := <-outputChan
+	wg.Wait()
 	r.Close()
 
-	return output, exitCode, err
+	return buf.String(), exitCode, callErr
 }
 
 // GetThreadDump retrieves a thread dump from the target JVM.
