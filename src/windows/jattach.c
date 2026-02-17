@@ -183,6 +183,7 @@ static int inject_thread(int pid, char* pipeName, int argc, char** argv) {
         success = 0;
     } else {
         printf("Connected to remote process\n");
+        fflush(stdout);
         WaitForSingleObject(hThread, INFINITE);
         DWORD exitCode;
         GetExitCodeThread(hThread, &exitCode);
@@ -221,8 +222,9 @@ static int read_response(HANDLE hPipe, int print_output) {
         do {
             fwrite(buf, 1, bytesRead, stdout);
         } while (ReadFile(hPipe, buf, sizeof(buf), &bytesRead, NULL));
-         printf("\n");
-     }
+        printf("\n");
+        fflush(stdout);  /* ensure output is visible when stdout is a pipe (e.g. Go AttachWithOutput) */
+    }
 
     return result;
 }

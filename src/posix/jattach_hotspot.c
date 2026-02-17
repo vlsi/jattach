@@ -181,6 +181,7 @@ static int read_response(int fd, int argc, char** argv, int print_output) {
             bytes = read(fd, buf, sizeof(buf));
         } while (bytes > 0);
         printf("\n");
+        fflush(stdout);  /* ensure output is visible when stdout is a pipe (e.g. Go AttachWithOutput) */
     }
 
     return result;
@@ -200,6 +201,7 @@ int jattach_hotspot(int pid, int nspid, int argc, char** argv, int print_output)
 
     if (print_output) {
         printf("Connected to remote JVM\n");
+        fflush(stdout);
     }
 
     if (write_command(fd, argc, argv) != 0) {

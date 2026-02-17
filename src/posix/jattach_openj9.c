@@ -99,6 +99,7 @@ static void print_unescaped(char* str) {
 
     fwrite(str, 1, strlen(str), stdout);
     printf("\n");
+    fflush(stdout);
 }
 
 // Send command with arguments to socket
@@ -168,6 +169,7 @@ static int read_response(int fd, const char* cmd, int print_output) {
     if (print_output) {
         buf[off - 1] = '\n';
         fwrite(buf, 1, off, stdout);
+        fflush(stdout);
     }
 
     free(buf);
@@ -412,6 +414,7 @@ int jattach_openj9(int pid, int nspid, int argc, char** argv, int print_output) 
 
     if (print_output) {
         printf("Connected to remote JVM\n");
+        fflush(stdout);
     }
 
     char cmd[8192];
